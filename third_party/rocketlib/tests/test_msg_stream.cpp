@@ -1,0 +1,165 @@
+#include <cstdint>
+#include <cstring>
+
+#include "common/common.h"
+#include "rockettest.hpp"
+
+#include "can_message/can.h"
+#include "can_message/msg_common.h"
+#include "can_message/msg_stream.h"
+#include "can_message/packet_format.h"
+
+namespace {
+
+	constexpr std::uint32_t kMax24BitValue = (1U << 24) - 1;
+
+}
+
+class stream_status_msg_test : public rockettest_test {
+public:
+	stream_status_msg_test() : rockettest_test("stream_status_msg_test") {}
+
+	bool run_test() override {
+		bool test_passed = true;
+
+		can_msg_t msg{};
+
+		can_msg_prio_t prio = rockettest_rand_field<can_msg_prio_t, 0x3>();
+		std::uint16_t timestamp = rockettest_rand_field<std::uint16_t>();
+		std::uint32_t total_size = rockettest_rand_field<std::uint32_t, kMax24BitValue>();
+		std::uint32_t tx_size = rockettest_rand_field<std::uint32_t, kMax24BitValue>();
+
+		build_stream_status_msg(prio, timestamp, total_size, tx_size, &msg);
+		rockettest_check_expr_true(msg.sid == build_sid(prio, MSG_STREAM_STATUS, 0));
+		rockettest_check_expr_true(msg.data_len == 8);
+
+		std::uint32_t invalid_total_or_tx_size = kMax24BitValue + 1;
+		rockettest_check_assert_triggered([=]() mutable {
+			build_stream_status_msg(prio, timestamp, invalid_total_or_tx_size, tx_size, &msg);
+		});
+		rockettest_check_assert_triggered([=]() mutable {
+			build_stream_status_msg(prio, timestamp, total_size, invalid_total_or_tx_size, &msg);
+		});
+
+		std::uint32_t total_size_out = 0;
+		std::uint32_t tx_size_out = 0;
+		rockettest_check_expr_true(get_stream_status(&msg, &total_size_out, &tx_size_out) ==
+		                           W_SUCCESS);
+		rockettest_check_expr_true(total_size_out == total_size);
+		rockettest_check_expr_true(tx_size_out == tx_size);
+
+		can_msg_t invalid_type_msg = msg;
+		invalid_type_msg.sid = build_sid(prio, MSG_STREAM_DATA, 0);
+		rockettest_check_expr_true(
+			get_stream_status(&invalid_type_msg, &total_size_out, &tx_size_out) == W_INVALID_PARAM);
+
+		can_msg_t invalid_len_msg = msg;
+		invalid_len_msg.data_len = 7;
+		rockettest_check_expr_true(get_stream_status(&invalid_len_msg, &total_size_out,
+		                                             &tx_size_out) == W_DATA_FORMAT_ERROR);
+
+		return test_passed;
+	}
+};
+
+stream_status_msg_test stream_status_msg_test_inst;
+
+class stream_data_msg_test : public rockettest_test {
+public:
+	stream_data_msg_test() : rockettest_test("stream_data_msg_test") {}
+
+	bool run_test() override {
+		bool test_passed = true;
+
+		can_msg_t msg{};
+
+		can_msg_prio_t prio = rockettest_rand_field<can_msg_prio_t, 0x3>();
+		std::uint16_t timestamp = rockettest_rand_field<std::uint16_t>();
+		std::uint8_t seq_id = rockettest_rand_field<std::uint8_t, 0xff>();
+		std::uint8_t payload_len = STREAM_DATA_MAX_PAYLOAD_LEN;
+		std::uint8_t payload[STREAM_DATA_MAX_PAYLOAD_LEN];
+		for (std::uint8_t i = 0; i < payload_len; ++i) {
+			payload[i] = rockettest_rand_field<std::uint8_t>();
+		}
+
+		build_stream_data_msg(prio, timestamp, seq_id, payload, payload_len, &msg);
+		rockettest_check_expr_true(msg.sid == build_sid(prio, MSG_STREAM_DATA, seq_id));
+		rockettest_check_expr_true(msg.data_len == static_cast<std::uint8_t>(payload_len + 2));
+		rockettest_check_expr_true((msg.sid & 0xff) == seq_id);
+		rockettest_check_expr_true(std::memcmp(&msg.data[2], payload, payload_len) == 0);
+
+		std::uint8_t invalid_payload_len = STREAM_DATA_MAX_PAYLOAD_LEN + 1;
+		rockettest_check_assert_triggered([=]() mutable {
+			build_stream_data_msg(prio, timestamp, seq_id, payload, invalid_payload_len, &msg);
+		});
+
+		std::uint8_t seq_id_out = 0;
+		std::uint8_t payload_out[STREAM_DATA_MAX_PAYLOAD_LEN] = {};
+		std::uint8_t payload_len_out = 0;
+
+		rockettest_check_expr_true(
+			get_stream_data(&msg, &seq_id_out, payload_out, &payload_len_out) == W_SUCCESS);
+		rockettest_check_expr_true(seq_id_out == seq_id);
+		rockettest_check_expr_true(payload_len_out == payload_len);
+		rockettest_check_expr_true(std::memcmp(payload_out, payload, payload_len) == 0);
+
+		can_msg_t invalid_len_msg = msg;
+		invalid_len_msg.sid = build_sid(prio, MSG_STREAM_DATA, seq_id);
+		// Too short data_len
+		invalid_len_msg.data_len = 2;
+		rockettest_check_expr_true(get_stream_data(&invalid_len_msg, &seq_id_out, payload_out,
+		                                           &payload_len_out) == W_DATA_FORMAT_ERROR);
+		// Too long data_len
+		invalid_len_msg.data_len = 9;
+		rockettest_check_expr_true(get_stream_data(&invalid_len_msg, &seq_id_out, payload_out,
+		                                           &payload_len_out) == W_DATA_FORMAT_ERROR);
+
+		can_msg_t invalid_type_msg = msg;
+		invalid_type_msg.sid = build_sid(prio, MSG_STREAM_RETRY, seq_id);
+		invalid_type_msg.data_len = msg.data_len;
+		rockettest_check_expr_true(get_stream_data(&invalid_type_msg, &seq_id_out, payload_out,
+		                                           &payload_len_out) == W_INVALID_PARAM);
+
+		return test_passed;
+	}
+};
+
+stream_data_msg_test stream_data_msg_test_inst;
+
+class stream_retry_msg_test : public rockettest_test {
+public:
+	stream_retry_msg_test() : rockettest_test("stream_retry_msg_test") {}
+
+	bool run_test() override {
+		bool test_passed = true;
+
+		can_msg_t msg{};
+
+		can_msg_prio_t prio = rockettest_rand_field<can_msg_prio_t, 0x3>();
+		std::uint16_t timestamp = rockettest_rand_field<std::uint16_t>();
+		std::uint8_t seq_id = rockettest_rand_field<std::uint8_t, 0xff>();
+
+		build_stream_retry_msg(prio, timestamp, seq_id, &msg);
+		rockettest_check_expr_true(msg.sid == build_sid(prio, MSG_STREAM_RETRY, seq_id));
+		rockettest_check_expr_true(msg.data_len == 2);
+		rockettest_check_expr_true((msg.sid & 0xff) == seq_id);
+
+		std::uint8_t seq_id_out = 0;
+		rockettest_check_expr_true(get_stream_retry_seq_id(&msg, &seq_id_out) == W_SUCCESS);
+		rockettest_check_expr_true(seq_id_out == seq_id);
+
+		can_msg_t invalid_type_msg = msg;
+		invalid_type_msg.sid = build_sid(prio, MSG_STREAM_STATUS, seq_id);
+		rockettest_check_expr_true(get_stream_retry_seq_id(&invalid_type_msg, &seq_id_out) ==
+		                           W_INVALID_PARAM);
+
+		can_msg_t invalid_len_msg = msg;
+		invalid_len_msg.data_len = 3;
+		rockettest_check_expr_true(get_stream_retry_seq_id(&invalid_len_msg, &seq_id_out) ==
+		                           W_DATA_FORMAT_ERROR);
+
+		return test_passed;
+	}
+};
+
+stream_retry_msg_test stream_retry_msg_test_inst;
